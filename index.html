@@ -155,8 +155,9 @@
     </div>
 
     <div class="instructions">
-        Select a color and place it on the grid. The simulator will calculate the probabilities. <br>
-        <strong>The cell with a flashing gold border</strong> is your best suggested move to maximize points and find purples.
+        Select a color and place it on the grid. The simulator will calculate probabilities.<br>
+        <strong>Note:</strong> The 4th purple sphere will transform into a <strong>RED</strong> sphere and will cost 1 attempt.<br>
+        <strong>The cell with a flashing gold border</strong> is your best suggested move.
     </div>
 
     <div id="palette"></div>
@@ -183,6 +184,24 @@
 
         let currentTool = "empty";
         let board = new Array(TOTAL_CELLS).fill(-1);
+
+        // Pre-calculate fast neighbor lookup
+        const cellNeighbors = new Array(TOTAL_CELLS);
+        for(let i=0; i<TOTAL_CELLS; i++) {
+            const r = Math.floor(i / COLS);
+            const c = i % COLS;
+            const neighbors = [];
+            for (let y = -1; y <= 1; y++) {
+                for (let x = -1; x <= 1; x++) {
+                    if (y === 0 && x === 0) continue;
+                    const nr = r + y, nc = c + x;
+                    if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                        neighbors.push(nr * COLS + nc);
+                    }
+                }
+            }
+            cellNeighbors[i] = neighbors;
+        }
 
         // Initialize UI
         function init() {
@@ -212,7 +231,7 @@
 
         function createGrid() {
             const gridDiv = document.getElementById('grid');
-            gridDiv.innerHTML = ''; // Clear existing
+            gridDiv.innerHTML = ''; 
             for (let i = 0; i < TOTAL_CELLS; i++) {
                 const cell = document.createElement('div');
                 cell.className = 'cell';
@@ -226,45 +245,13 @@
             board.fill(-1);
             currentTool = "empty";
             document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('selected'));
-            document.querySelector('.tool-btn').classList.add('selected'); // Default to clear
+            document.querySelector('.tool-btn').classList.add('selected'); 
             calculateProbabilities();
         }
 
         function clickCell(index) {
             board[index] = TOOLS[currentTool].val;
             calculateProbabilities();
-        }
-
-        // Helper to get neighbors
-        function getNeighbors(index) {
-            const r = Math.floor(index / COLS);
-            const c = index % COLS;
-            const neighbors = [];
-            for (let i = -1; i <= 1; i++) {
-                for (let j = -1; j <= 1; j++) {
-                    if (i === 0 && j === 0) continue;
-                    const nr = r + i, nc = c + j;
-                    if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
-                        neighbors.push(nr * COLS + nc);
-                    }
-                }
-            }
-            return neighbors;
-        }
-
-        // Combinations generator
-        function getCombinations(array, k) {
-            if (k === 0) return [[]];
-            if (k > array.length) return [];
-            if (k === array.length) return [array];
-            
-            const head = array[0];
-            const tail = array.slice(1);
-            
-            const withHead = getCombinations(tail, k - 1).map(comb => [head, ...comb]);
-            const withoutHead = getCombinations(tail, k);
-            
-            return [...withHead, ...withoutHead];
         }
 
         function calculateProbabilities() {
@@ -286,8 +273,11 @@
                 }
             }
 
-            // Update Attempts Counter
-            const attemptsLeft = MAX_ATTEMPTS - revealedNonPurples;
+            // Update Attempts Counter: 4th purple (Red) costs 1 attempt
+            let attemptsLeft = MAX_ATTEMPTS - revealedNonPurples;
+            if (knownMines.size === 4) {
+                attemptsLeft -= 1; 
+            }
             document.getElementById('attempts-left').innerText = attemptsLeft;
 
             if (knownMines.size > TOTAL_PURPLES) {
@@ -307,33 +297,74 @@
             let validScenarios = 0;
             const validMineCount = new Array(TOTAL_CELLS).fill(0);
 
-            const combos = getCombinations(availablePositions, minesToPlace);
+            // Backtracking Optimization (Pruning invalid scenarios)
+            const constraints = [];
+            for (const [pos, expected] of knownNumbers.entries()) {
+                constraints.push({ pos: pos, expected: expected });
+            }
 
-            // Test each combination
-            for (const combo of combos) {
-                const currentMines = new Set([...combo, ...knownMines]);
-                let isValid = true;
-
-                for (const [pos, expectedNumber] of knownNumbers.entries()) {
-                    const neighbors = getNeighbors(pos);
-                    let minesAround = 0;
-                    for (const n of neighbors) {
-                        if (currentMines.has(n)) minesAround++;
-                    }
-
-                    if (minesAround !== expectedNumber) {
-                        isValid = false;
-                        break;
-                    }
-                }
-
-                if (isValid) {
-                    validScenarios++;
-                    for (const mine of currentMines) {
-                        validMineCount[mine]++;
-                    }
+            const minesAroundConstraint = new Array(TOTAL_CELLS).fill(0);
+            for (const mine of knownMines) {
+                for (const n of cellNeighbors[mine]) {
+                    minesAroundConstraint[n]++;
                 }
             }
+
+            const currentCombo = [];
+
+            function solve(idx, minesPlaced) {
+                if (minesPlaced === TOTAL_PURPLES) {
+                    // Final exact match check
+                    let valid = true;
+                    for (const c of constraints) {
+                        if (minesAroundConstraint[c.pos] !== c.expected) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (valid) {
+                        validScenarios++;
+                        for (const mine of currentCombo) {
+                            validMineCount[mine]++;
+                        }
+                    }
+                    return;
+                }
+
+                if (idx >= availablePositions.length) return;
+
+                const pos = availablePositions[idx];
+                const neighbors = cellNeighbors[pos];
+                let canPlace = true;
+
+                // Pruning Check: Placing here must not exceed constraints
+                for (const n of neighbors) {
+                    if (knownNumbers.has(n)) {
+                        if (minesAroundConstraint[n] + 1 > knownNumbers.get(n)) {
+                            canPlace = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (canPlace) {
+                    // Place mine
+                    for (const n of neighbors) minesAroundConstraint[n]++;
+                    currentCombo.push(pos);
+                    
+                    solve(idx + 1, minesPlaced + 1);
+                    
+                    // Backtrack
+                    currentCombo.pop();
+                    for (const n of neighbors) minesAroundConstraint[n]--;
+                }
+
+                // Skip placing mine
+                solve(idx + 1, minesPlaced);
+            }
+
+            // Start backtracking
+            solve(0, knownMines.size);
 
             updateBoardUI(validScenarios, validMineCount, attemptsLeft, knownMines.size);
         }
@@ -341,6 +372,8 @@
         function updateBoardUI(validScenarios, validMineCount, attemptsLeft, knownPurplesCount) {
             let cellStats = [];
             let totalCertainPurples = knownPurplesCount;
+            let certainPurplesFoundUnplaced = knownPurplesCount;
+            let purplesRendered = 0;
 
             // First pass: Calculate stats for the recommendation engine
             for (let i = 0; i < TOTAL_CELLS; i++) {
@@ -348,9 +381,8 @@
                     let prob = validMineCount[i] / validScenarios;
                     if (prob === 1) totalCertainPurples++;
                     
-                    // Expected Points = Expected number of adjacent purples
                     let expectedPoints = 0;
-                    let neighbors = getNeighbors(i);
+                    let neighbors = cellNeighbors[i];
                     for (let n of neighbors) {
                         if (board[n] === 9) {
                             expectedPoints += 1;
@@ -367,23 +399,18 @@
             let bestCell = -1;
             if (cellStats.length > 0 && attemptsLeft > 0) {
                 if (totalCertainPurples >= TOTAL_PURPLES) {
-                    // We know where all purples are. 
                     let certainPurple = cellStats.find(c => c.prob === 1);
                     if (certainPurple) {
-                        // Click unrevealed purples first (they cost 0 attempts)
                         bestCell = certainPurple.index;
                     } else {
-                        // All purples are clicked, maximize points
                         cellStats.sort((a, b) => b.points - a.points);
                         bestCell = cellStats[0].index;
                     }
                 } else {
-                    // We still need to find purples
                     let certainPurple = cellStats.find(c => c.prob === 1);
                     if (certainPurple) {
                         bestCell = certainPurple.index;
                     } else {
-                        // Guess the one with highest probability. Tiebreaker: max expected points
                         cellStats.sort((a, b) => {
                             if (b.prob !== a.prob) return b.prob - a.prob;
                             return b.points - a.points;
@@ -398,7 +425,6 @@
                 const cell = document.getElementById(`cell-${i}`);
                 const val = board[i];
 
-                // Remove recommendation visual
                 cell.classList.remove('recommended');
                 cell.style.border = "1px solid #bbb";
 
@@ -409,20 +435,29 @@
                         cell.style.color = "#fff";
                     } else {
                         const prob = (validMineCount[i] / validScenarios) * 100;
-                        cell.innerText = `${prob.toFixed(1)}%`;
                         
                         if (prob === 100) {
-                            cell.style.backgroundColor = "#ffcccc"; // Certain sphere
-                            cell.style.color = "#000";
-                        } else if (prob === 0) {
-                            cell.style.backgroundColor = "#ccffcc"; // Safe
-                            cell.style.color = "#000";
+                            certainPurplesFoundUnplaced++;
+                            if (certainPurplesFoundUnplaced === 4) {
+                                cell.innerText = "100% (R)";
+                                cell.style.backgroundColor = "#ff7272"; // Reddish for unplaced RED
+                                cell.style.color = "#fff";
+                            } else {
+                                cell.innerText = "100% (P)";
+                                cell.style.backgroundColor = "#e066e0"; // Purplish
+                                cell.style.color = "#fff";
+                            }
                         } else {
-                            cell.style.backgroundColor = "#f0f0f0";
-                            cell.style.color = "#000";
+                            cell.innerText = `${prob.toFixed(1)}%`;
+                            if (prob === 0) {
+                                cell.style.backgroundColor = "#ccffcc"; // Safe
+                                cell.style.color = "#000";
+                            } else {
+                                cell.style.backgroundColor = "#f0f0f0";
+                                cell.style.color = "#000";
+                            }
                         }
 
-                        // Add recommendation visual if it is the best cell
                         if (i === bestCell) {
                             cell.classList.add('recommended');
                         }
@@ -437,14 +472,28 @@
                         }
                     }
                     const tool = TOOLS[toolKey];
-                    cell.innerText = val === 9 ? "P" : val;
-                    cell.style.backgroundColor = tool.color;
-                    cell.style.color = tool.textColor;
+
+                    // Transform 4th Purple into RED
+                    if (val === 9) {
+                        purplesRendered++;
+                        if (purplesRendered === 4) {
+                            cell.innerText = "R";
+                            cell.style.backgroundColor = "#FF0000"; // Red
+                            cell.style.color = "#fff";
+                        } else {
+                            cell.innerText = "P";
+                            cell.style.backgroundColor = tool.color;
+                            cell.style.color = tool.textColor;
+                        }
+                    } else {
+                        cell.innerText = val;
+                        cell.style.backgroundColor = tool.color;
+                        cell.style.color = tool.textColor;
+                    }
                 }
             }
         }
 
-        // Start the app
         init();
     </script>
 </body>
